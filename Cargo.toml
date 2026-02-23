@@ -1,6 +1,21 @@
 [package]
 name = "pqauth"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "Post-quantum safe 2FA system — CRYSTALS-Dilithium + Kyber, lattice-based authentication, pure Rust"
+license = "MIT"
+repository = "https://github.com/redbasecap-buiss/pqauth"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha3 = "0.10"
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
+zeroize = { version = "1", features = ["derive"] }
+hex = "0.4"
+rand = "0.8"
+chrono = "0.4"
+base32 = "0.5"
+thiserror = "1"
