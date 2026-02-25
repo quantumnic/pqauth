@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use pqauth::{dilithium, pq_totp};
-use std::time::{SystemTime, UNIX_EPOCH};
+use pqauth::{dilithium, kyber, pq_totp, recovery};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "pqauth")]
@@ -34,6 +34,18 @@ enum Commands {
     },
     /// Show key size comparison (PQ vs classical)
     Info,
+    /// Generate recovery codes
+    Recovery {
+        /// Number of codes to generate
+        #[arg(long, default_value = "10")]
+        count: usize,
+    },
+    /// Benchmark PQ operations
+    Benchmark {
+        /// Number of iterations
+        #[arg(long, default_value = "100")]
+        iterations: usize,
+    },
 }
 
 fn now_unix() -> u64 {
@@ -115,6 +127,86 @@ fn main() {
             println!("\nNote: PQ keys are larger but provide quantum resistance.");
             println!("NIST estimates quantum computers capable of breaking RSA/ECC");
             println!("could emerge within 10-20 years. Migrate now.");
+        }
+        Commands::Recovery { count } => {
+            let codes = recovery::generate_codes(count);
+            println!("=== Recovery Codes ===");
+            println!("Store these in a safe place. Each code can only be used once.\n");
+            for (i, code) in codes.iter().enumerate() {
+                println!("  {:2}. {}", i + 1, code.code);
+            }
+            println!("\n⚠  These codes will NOT be shown again.");
+            println!("   Each provides ~155 bits of entropy.");
+        }
+        Commands::Benchmark { iterations } => {
+            println!("=== PQ Cryptography Benchmark ({iterations} iterations) ===\n");
+
+            // Dilithium3 keygen
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = dilithium::Keypair::generate();
+            }
+            let dilithium_keygen = start.elapsed() / iterations as u32;
+
+            // Dilithium3 sign
+            let kp = dilithium::Keypair::generate();
+            let msg = b"benchmark message for signing operations";
+            let start = Instant::now();
+            let mut sig = vec![];
+            for _ in 0..iterations {
+                sig = kp.sign(msg).unwrap();
+            }
+            let dilithium_sign = start.elapsed() / iterations as u32;
+
+            // Dilithium3 verify
+            let start = Instant::now();
+            for _ in 0..iterations {
+                kp.verify(msg, &sig).unwrap();
+            }
+            let dilithium_verify = start.elapsed() / iterations as u32;
+
+            // Kyber768 keygen
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = kyber::KyberKeypair::generate();
+            }
+            let kyber_keygen = start.elapsed() / iterations as u32;
+
+            // Kyber768 encapsulate
+            let kyber_kp = kyber::KyberKeypair::generate();
+            let start = Instant::now();
+            let mut enc = kyber::encapsulate(&kyber_kp.public_key).unwrap();
+            for _ in 1..iterations {
+                enc = kyber::encapsulate(&kyber_kp.public_key).unwrap();
+            }
+            let kyber_encaps = start.elapsed() / iterations as u32;
+
+            // Kyber768 decapsulate
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = kyber_kp.decapsulate(&enc.ciphertext).unwrap();
+            }
+            let kyber_decaps = start.elapsed() / iterations as u32;
+
+            // PQ-TOTP generate
+            let secret = b"benchmark-secret-key-32-bytes!!";
+            let ts = now_unix();
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = pq_totp::generate(secret, ts);
+            }
+            let totp_gen = start.elapsed() / iterations as u32;
+
+            println!("{:<25} {:>12}", "Operation", "Avg Time");
+            println!("{}", "-".repeat(38));
+            println!("{:<25} {:>12?}", "Dilithium3 keygen", dilithium_keygen);
+            println!("{:<25} {:>12?}", "Dilithium3 sign", dilithium_sign);
+            println!("{:<25} {:>12?}", "Dilithium3 verify", dilithium_verify);
+            println!("{:<25} {:>12?}", "Kyber768 keygen", kyber_keygen);
+            println!("{:<25} {:>12?}", "Kyber768 encapsulate", kyber_encaps);
+            println!("{:<25} {:>12?}", "Kyber768 decapsulate", kyber_decaps);
+            println!("{:<25} {:>12?}", "PQ-TOTP generate", totp_gen);
+            println!("\nAll operations are fast enough for real-time 2FA.");
         }
     }
 }
