@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use pqauth::{dilithium, kyber, pq_totp, recovery};
+use pqauth::{dilithium, hybrid, kyber, pq_totp, recovery, server};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -14,7 +14,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Generate a new Dilithium3 keypair
-    Keygen,
+    Keygen {
+        /// Generate hybrid Ed25519+Dilithium3 keypair
+        #[arg(long)]
+        hybrid: bool,
+    },
+    /// Start the PQ-Auth REST server
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "8443")]
+        port: u16,
+        /// Server identity (domain)
+        #[arg(long, default_value = "localhost")]
+        server_id: String,
+    },
     /// Generate current PQ-TOTP code
     Auth {
         /// Hex-encoded shared secret
@@ -59,20 +72,41 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Keygen => {
-            let kp = dilithium::Keypair::generate();
-            println!("=== Dilithium3 Keypair ===");
-            println!(
-                "Public key ({} bytes): {}",
-                kp.public_key.len(),
-                hex::encode(&kp.public_key)
-            );
-            println!(
-                "Secret key ({} bytes): [redacted, {} bytes]",
-                kp.secret_key.len(),
-                kp.secret_key.len()
-            );
-            println!("\nSecurity level: NIST Level 3 (~128-bit quantum security)");
+        Commands::Keygen { hybrid: use_hybrid } => {
+            if use_hybrid {
+                let kp = hybrid::HybridKeypair::generate();
+                println!("=== Hybrid Ed25519 + Dilithium3 Keypair ===");
+                println!(
+                    "Ed25519 public key ({} bytes): {}",
+                    kp.ed25519_public.len(),
+                    hex::encode(&kp.ed25519_public)
+                );
+                println!(
+                    "Dilithium3 public key ({} bytes): {}",
+                    kp.dilithium_public.len(),
+                    hex::encode(&kp.dilithium_public)
+                );
+                println!("\nSecurity: Classical (Ed25519) + Quantum (Dilithium3)");
+                println!("Hybrid signature size: {} bytes", hybrid::HYBRID_SIG_SIZE);
+            } else {
+                let kp = dilithium::Keypair::generate();
+                println!("=== Dilithium3 Keypair ===");
+                println!(
+                    "Public key ({} bytes): {}",
+                    kp.public_key.len(),
+                    hex::encode(&kp.public_key)
+                );
+                println!(
+                    "Secret key ({} bytes): [redacted, {} bytes]",
+                    kp.secret_key.len(),
+                    kp.secret_key.len()
+                );
+                println!("\nSecurity level: NIST Level 3 (~128-bit quantum security)");
+            }
+        }
+        Commands::Serve { port, server_id } => {
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(run_server(port, &server_id));
         }
         Commands::Auth { secret } => {
             let secret_bytes = hex::decode(&secret).expect("invalid hex secret");
@@ -209,4 +243,85 @@ fn main() {
             println!("\nAll operations are fast enough for real-time 2FA.");
         }
     }
+}
+
+async fn run_server(port: u16, server_id: &str) {
+    use axum::{http::StatusCode, routing::post, Json, Router};
+
+    let state = server::PqAuthServer::new(server_id);
+
+    let app = Router::new()
+        .route(
+            "/enroll/begin",
+            post({
+                let s = state.clone();
+                move |Json(req): Json<server::EnrollBeginRequest>| async move {
+                    match s.enroll_begin(&req.user_id) {
+                        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())),
+                        Err(e) => (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": e.to_string() })),
+                        ),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/enroll/complete",
+            post({
+                let s = state.clone();
+                move |Json(req): Json<server::EnrollCompleteRequest>| async move {
+                    match s.enroll_complete(&req) {
+                        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())),
+                        Err(e) => (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": e.to_string() })),
+                        ),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/challenge",
+            post({
+                let s = state.clone();
+                move |Json(req): Json<server::ChallengeRequest>| async move {
+                    match s.issue_challenge(&req.user_id) {
+                        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())),
+                        Err(e) => (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": e.to_string() })),
+                        ),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/verify",
+            post({
+                let s = state.clone();
+                move |Json(req): Json<server::VerifyRequest>| async move {
+                    match s.verify(&req) {
+                        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())),
+                        Err(e) => (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": e.to_string() })),
+                        ),
+                    }
+                }
+            }),
+        );
+
+    let addr = format!("0.0.0.0:{port}");
+    println!("🔐 PQ-Auth server starting on http://{addr}");
+    println!("   Server ID: {server_id}");
+    println!("   Endpoints:");
+    println!("     POST /enroll/begin    — Start enrollment");
+    println!("     POST /enroll/complete — Complete enrollment");
+    println!("     POST /challenge       — Get auth challenge");
+    println!("     POST /verify          — Verify TOTP or challenge-response");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("bind failed");
+    axum::serve(listener, app).await.expect("server error");
 }

@@ -1,6 +1,6 @@
 [package]
 name = "pqauth"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Post-quantum safe 2FA system — CRYSTALS-Dilithium + Kyber, lattice-based authentication, pure Rust"
 license = "MIT"
@@ -22,3 +22,6 @@ thiserror = "1"
 pqcrypto-kyber = "0.8"
 argon2 = "0.5"
 aes-gcm = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }

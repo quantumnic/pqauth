@@ -16,6 +16,16 @@ use zeroize::Zeroize;
 /// Default MAC output length in bytes (32 bytes = 256 bits of security).
 pub const DEFAULT_MAC_LEN: usize = 32;
 
+/// Plain SHAKE-256 hash (no keying). Used for key derivation.
+pub fn shake256(input: &[u8], out_len: usize) -> Vec<u8> {
+    let mut hasher = Shake256::default();
+    hasher.update(input);
+    let mut output = vec![0u8; out_len];
+    let mut reader = hasher.finalize_xof();
+    reader.read(&mut output);
+    output
+}
+
 /// Compute SHAKE-256 envelope MAC: SHAKE256(key || message || key, out_len).
 ///
 /// The envelope construction prevents length-extension attacks and provides
