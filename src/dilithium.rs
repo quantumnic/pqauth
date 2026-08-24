@@ -17,6 +17,7 @@ use pqcrypto_dilithium::dilithium3;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Error, Debug)]
 pub enum DilithiumError {
@@ -31,7 +32,9 @@ pub enum DilithiumError {
 }
 
 /// A Dilithium3 keypair for signing.
-#[derive(Serialize, Deserialize, Clone)]
+///
+/// The secret key is zeroized when the keypair is dropped.
+#[derive(Serialize, Deserialize, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Keypair {
     pub public_key: Vec<u8>,
     #[serde(skip_serializing)]

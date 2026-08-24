@@ -12,7 +12,7 @@
 use crate::dilithium::{self, Keypair};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use thiserror::Error;
 
 /// Challenge validity window in seconds.
@@ -92,8 +92,9 @@ pub fn respond_to_challenge(
 
 /// Server-side verifier with replay prevention.
 pub struct ChallengeVerifier {
-    /// Set of used nonces (in production, use a time-bounded cache).
-    used_nonces: HashSet<[u8; 32]>,
+    /// Nonces already consumed, mapped to the challenge issue timestamp so
+    /// entries can be pruned without ever re-opening the replay window.
+    used_nonces: HashMap<[u8; 32], u64>,
     /// Maximum allowed clock skew in seconds.
     max_clock_skew: u64,
 }
@@ -101,7 +102,7 @@ pub struct ChallengeVerifier {
 impl ChallengeVerifier {
     pub fn new(max_clock_skew: u64) -> Self {
         Self {
-            used_nonces: HashSet::new(),
+            used_nonces: HashMap::new(),
             max_clock_skew,
         }
     }
@@ -114,13 +115,16 @@ impl ChallengeVerifier {
         public_key: &[u8],
         current_timestamp: u64,
     ) -> Result<(), ChallengeError> {
+        // 0. Prune nonces that can no longer be replayed (challenge expired)
+        self.clear_expired(current_timestamp);
+
         // 1. Check challenge not expired
         if challenge.is_expired(current_timestamp) {
             return Err(ChallengeError::Expired);
         }
 
         // 2. Check nonce not reused
-        if self.used_nonces.contains(&response.nonce) {
+        if self.used_nonces.contains_key(&response.nonce) {
             return Err(ChallengeError::Replay);
         }
 
@@ -134,17 +138,22 @@ impl ChallengeVerifier {
         let payload = challenge.signing_payload(response.client_timestamp);
         dilithium::verify_detached(public_key, &payload, &response.signature)?;
 
-        // 5. Mark nonce as used
-        self.used_nonces.insert(response.nonce);
+        // 5. Mark nonce as used, recording when its validity window ends
+        self.used_nonces.insert(response.nonce, challenge.issued_at);
 
         Ok(())
     }
 
-    /// Clear expired nonces (call periodically).
-    pub fn clear_expired(&mut self) {
-        // In a real implementation, nonces would be stored with timestamps
-        // and expired ones pruned. For now, just clear all.
-        self.used_nonces.clear();
+    /// Forget only nonces whose challenges can no longer be accepted.
+    ///
+    /// A nonce is kept until `CHALLENGE_VALIDITY_SECS` after its challenge was
+    /// issued (plus clock-skew margin); clearing it any earlier would allow a
+    /// captured response to be replayed while still within the validity window.
+    pub fn clear_expired(&mut self, current_timestamp: u64) {
+        let horizon = current_timestamp
+            .saturating_sub(CHALLENGE_VALIDITY_SECS)
+            .saturating_sub(self.max_clock_skew);
+        self.used_nonces.retain(|_, issued_at| *issued_at > horizon);
     }
 }
 
@@ -250,5 +259,65 @@ mod tests {
         let mut verifier = ChallengeVerifier::new(60);
         let result = verifier.verify(&challenge, &response, &keypair.public_key, ts + 1);
         assert!(matches!(result, Err(ChallengeError::TimestampOutOfRange)));
+    }
+
+    #[test]
+    fn test_prune_keeps_fresh_nonce_unreplayable() {
+        let keypair = Keypair::generate();
+        let ts = 1000000u64;
+
+        let challenge = Challenge::new(ts);
+        let response = respond_to_challenge(&keypair, &challenge, ts).unwrap();
+
+        let mut verifier = ChallengeVerifier::new(60);
+        assert!(verifier
+            .verify(&challenge, &response, &keypair.public_key, ts + 1)
+            .is_ok());
+
+        // Pruning mid-validity-window must NOT reopen the replay window.
+        verifier.clear_expired(ts + 10);
+        let result = verifier.verify(&challenge, &response, &keypair.public_key, ts + 11);
+        assert!(matches!(result, Err(ChallengeError::Replay)));
+    }
+
+    #[test]
+    fn test_prune_drops_only_expired_nonces() {
+        let keypair1 = Keypair::generate();
+        let keypair2 = Keypair::generate();
+
+        let old_challenge = Challenge::new(1000000u64);
+        let old_response = respond_to_challenge(&keypair1, &old_challenge, 1000000).unwrap();
+
+        let mut verifier = ChallengeVerifier::new(60);
+        assert!(verifier
+            .verify(&old_challenge, &old_response, &keypair1.public_key, 1000001)
+            .is_ok());
+
+        // A later challenge is still valid when the old one expires.
+        let new_ts = 1000000 + CHALLENGE_VALIDITY_SECS + 61;
+        let new_challenge = Challenge::new(new_ts);
+        let new_response = respond_to_challenge(&keypair2, &new_challenge, new_ts).unwrap();
+        assert!(verifier
+            .verify(
+                &new_challenge,
+                &new_response,
+                &keypair2.public_key,
+                new_ts + 1
+            )
+            .is_ok());
+
+        // Prune at a time where only the old nonce is past its window:
+        // old nonce (issued 1000000) is forgettable, new one is not.
+        verifier.clear_expired(new_ts + 1);
+        assert_eq!(verifier.used_nonces.len(), 1);
+
+        // The forgotten nonce's challenge is expired anyway, so reuse fails on expiry.
+        let result = verifier.verify(
+            &old_challenge,
+            &old_response,
+            &keypair1.public_key,
+            new_ts + 1,
+        );
+        assert!(matches!(result, Err(ChallengeError::Expired)));
     }
 }

@@ -18,6 +18,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Ed25519 signature size.
 pub const ED25519_SIG_SIZE: usize = 64;
@@ -40,7 +41,9 @@ pub enum HybridError {
 }
 
 /// A hybrid keypair containing both Ed25519 and Dilithium3 keys.
-#[derive(Serialize, Deserialize, Clone)]
+///
+/// Secret key material is zeroized when the keypair is dropped.
+#[derive(Serialize, Deserialize, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct HybridKeypair {
     /// Ed25519 public key (32 bytes).
     pub ed25519_public: Vec<u8>,
@@ -72,8 +75,8 @@ impl HybridKeypair {
         Self {
             ed25519_public: ed_verifying.to_bytes().to_vec(),
             ed25519_secret: ed_signing.to_bytes().to_vec(),
-            dilithium_public: dil.public_key,
-            dilithium_secret: dil.secret_key,
+            dilithium_public: dil.public_key.clone(),
+            dilithium_secret: dil.secret_key.clone(),
         }
     }
 

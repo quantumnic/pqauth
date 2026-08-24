@@ -13,10 +13,12 @@
 //! The shared secret from Kyber is quantum-safe, so even if the enrollment
 //! exchange is recorded, a future quantum computer cannot recover the TOTP seed.
 
-use crate::kyber::{self, Encapsulated, KyberKeypair};
+use crate::dilithium::KeySizes as DilithiumKeySizes;
+use crate::kyber::{self, Encapsulated, KeySizes as KyberKeySizes, KyberKeypair};
 use crate::shake_mac;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separator for TOTP seed derivation.
 const TOTP_SEED_DOMAIN: &[u8] = b"pqauth-totp-seed-v1";
@@ -30,10 +32,16 @@ pub enum EnrollmentError {
     Kyber(#[from] kyber::KyberError),
     #[error("invalid server identity")]
     InvalidServerIdentity,
+    #[error("invalid ciphertext length (expected {expected}, got {got})")]
+    InvalidCiphertextLength { expected: usize, got: usize },
+    #[error("invalid Dilithium public key length (expected {expected}, got {got})")]
+    InvalidPublicKeyLength { expected: usize, got: usize },
 }
 
 /// Server-side enrollment state.
-#[derive(Serialize, Deserialize, Clone)]
+///
+/// The ephemeral Kyber secret key is zeroized when dropped.
+#[derive(Serialize, Deserialize, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ServerEnrollment {
     /// Server's Kyber keypair (ephemeral, for this enrollment only).
     pub kyber_public_key: Vec<u8>,
@@ -60,7 +68,9 @@ pub struct EnrollmentResponse {
 }
 
 /// Completed enrollment record stored by the server.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+///
+/// The TOTP seed is zeroized when the record is dropped.
+#[derive(Serialize, Deserialize, Clone, Debug, Zeroize, ZeroizeOnDrop)]
 pub struct EnrollmentRecord {
     /// Client's Dilithium public key.
     pub dilithium_public_key: Vec<u8>,
@@ -71,7 +81,9 @@ pub struct EnrollmentRecord {
 }
 
 /// Client-side enrollment result.
-#[derive(Clone)]
+///
+/// The TOTP seed is zeroized when dropped.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ClientEnrollment {
     /// Derived TOTP seed.
     pub totp_seed: Vec<u8>,
@@ -86,8 +98,8 @@ impl ServerEnrollment {
     pub fn new(server_id: &str) -> Self {
         let kp = KyberKeypair::generate();
         Self {
-            kyber_public_key: kp.public_key,
-            kyber_secret_key: kp.secret_key,
+            kyber_public_key: kp.public_key.clone(),
+            kyber_secret_key: kp.secret_key.clone(),
             server_id: server_id.to_string(),
         }
     }
@@ -105,12 +117,27 @@ impl ServerEnrollment {
         &self,
         response: &EnrollmentResponse,
     ) -> Result<EnrollmentRecord, EnrollmentError> {
+        // Validate lengths before touching key material so malformed
+        // enrollments are rejected with a clear error instead of being
+        // stored and only failing later during authentication.
+        if response.ciphertext.len() != KyberKeySizes::CIPHERTEXT {
+            return Err(EnrollmentError::InvalidCiphertextLength {
+                expected: KyberKeySizes::CIPHERTEXT,
+                got: response.ciphertext.len(),
+            });
+        }
+        if response.dilithium_public_key.len() != DilithiumKeySizes::PUBLIC_KEY {
+            return Err(EnrollmentError::InvalidPublicKeyLength {
+                expected: DilithiumKeySizes::PUBLIC_KEY,
+                got: response.dilithium_public_key.len(),
+            });
+        }
+
         // Reconstruct Kyber keypair to decapsulate
         let kp = KyberKeypair {
             public_key: self.kyber_public_key.clone(),
             secret_key: self.kyber_secret_key.clone(),
         };
-
         let shared_secret = kp.decapsulate(&response.ciphertext)?;
         let totp_seed = derive_totp_seed(&shared_secret, &self.server_id);
 
@@ -134,15 +161,16 @@ pub fn client_enroll(
         return Err(EnrollmentError::InvalidServerIdentity);
     }
 
+    let encapsulated = kyber::encapsulate(&challenge.kyber_public_key)?;
     let Encapsulated {
         ciphertext,
         shared_secret,
-    } = kyber::encapsulate(&challenge.kyber_public_key)?;
+    } = &encapsulated;
 
-    let totp_seed = derive_totp_seed(&shared_secret, &challenge.server_id);
+    let totp_seed = derive_totp_seed(shared_secret, &challenge.server_id);
 
     let response = EnrollmentResponse {
-        ciphertext,
+        ciphertext: ciphertext.clone(),
         dilithium_public_key: dilithium_public_key.to_vec(),
     };
 
@@ -250,6 +278,37 @@ mod tests {
         let s1 = derive_totp_seed(&shared, "test.com");
         let s2 = derive_totp_seed(&shared, "test.com");
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_reject_short_ciphertext() {
+        let client_kp = dilithium::Keypair::generate();
+        let server = ServerEnrollment::new("example.com");
+        let (mut response, _) = client_enroll(&server.challenge(), &client_kp.public_key).unwrap();
+        response.ciphertext.truncate(KyberKeySizes::CIPHERTEXT - 1);
+
+        let result = server.complete(&response);
+        assert!(matches!(
+            result,
+            Err(EnrollmentError::InvalidCiphertextLength { .. })
+        ));
+    }
+
+    #[test]
+    fn test_reject_invalid_public_key_length() {
+        let client_kp = dilithium::Keypair::generate();
+        let server = ServerEnrollment::new("example.com");
+        let (mut response, _) = client_enroll(&server.challenge(), &client_kp.public_key).unwrap();
+        response.dilithium_public_key = vec![0u8; 32];
+
+        let result = server.complete(&response);
+        assert!(matches!(
+            result,
+            Err(EnrollmentError::InvalidPublicKeyLength {
+                expected: DilithiumKeySizes::PUBLIC_KEY,
+                got: 32
+            })
+        ));
     }
 
     #[test]

@@ -19,6 +19,7 @@ use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SecretKey as _, SharedSecret as _};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Error, Debug)]
 pub enum KyberError {
@@ -43,7 +44,9 @@ impl KeySizes {
 }
 
 /// A Kyber768 keypair for key encapsulation.
-#[derive(Serialize, Deserialize, Clone)]
+///
+/// The secret key is zeroized when the keypair is dropped.
+#[derive(Serialize, Deserialize, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct KyberKeypair {
     pub public_key: Vec<u8>,
     #[serde(skip_serializing)]
@@ -51,7 +54,9 @@ pub struct KyberKeypair {
 }
 
 /// Result of encapsulation: ciphertext + shared secret.
-#[derive(Clone)]
+///
+/// The shared secret is zeroized when dropped.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Encapsulated {
     pub ciphertext: Vec<u8>,
     pub shared_secret: Vec<u8>,

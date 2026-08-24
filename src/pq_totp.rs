@@ -55,8 +55,11 @@ pub fn verify(secret: &[u8], code: u32, timestamp: u64, window: u64) -> bool {
     let start = current_step.saturating_sub(window);
     let end = current_step + window;
 
+    let candidate = code.to_be_bytes();
     for step in start..=end {
-        if generate_at_step(secret, step) == code {
+        // Constant-time comparison so verification timing does not leak
+        // how many leading bytes of the expected code matched.
+        if shake_mac::verify_mac(&candidate, &generate_at_step(secret, step).to_be_bytes()) {
             return true;
         }
     }
