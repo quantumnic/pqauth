@@ -83,9 +83,9 @@ pub fn hash_code(code: &str) -> HashedRecoveryCode {
 /// Returns the index of the matching code, or None.
 pub fn verify_code(code: &str, stored: &[HashedRecoveryCode]) -> Option<usize> {
     let candidate = hash_code(code);
-    stored
-        .iter()
-        .position(|h| !h.used && h.hash == candidate.hash)
+    stored.iter().position(|h| {
+        !h.used && shake_mac::verify_mac(h.hash.as_bytes(), candidate.hash.as_bytes())
+    })
 }
 
 /// Recovery code set with hashed codes for storage.

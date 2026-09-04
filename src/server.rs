@@ -8,9 +8,7 @@
 //!
 //! All state is in-memory (for research/demo purposes).
 
-use crate::challenge::{
-    self, Challenge, ChallengeResponse, ChallengeVerifier,
-};
+use crate::challenge::{self, Challenge, ChallengeResponse, ChallengeVerifier};
 use crate::enrollment::{self, EnrollmentRecord, ServerEnrollment};
 use crate::pq_totp;
 use serde::{Deserialize, Serialize};
@@ -284,7 +282,9 @@ impl PqAuthServer {
                     &req.user_id,
                     "verify_totp",
                     valid,
-                    Some(format!("code={totp_code}")),
+                    // Never persist the submitted code: audit logs must not
+                    // contain OTP material that could be replayed.
+                    None,
                 );
                 Ok(VerifyResponse {
                     valid,
