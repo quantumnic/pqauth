@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2021"
 description = "Post-quantum safe 2FA system — CRYSTALS-Dilithium + Kyber, lattice-based authentication, pure Rust"
 license = "MIT"
-repository = "https://github.com/redbasecap-buiss/pqauth"
+repository = "https://github.com/quantumnic/pqauth"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

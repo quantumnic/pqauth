@@ -1,6 +1,6 @@
 # pqauth — Post-Quantum Safe Two-Factor Authentication
 
-[![CI](https://github.com/redbasecap-buiss/pqauth/actions/workflows/ci.yml/badge.svg)](https://github.com/redbasecap-buiss/pqauth/actions)
+[![CI](https://github.com/quantumnic/pqauth/actions/workflows/ci.yml/badge.svg)](https://github.com/quantumnic/pqauth/actions)
 
 A research-grade post-quantum 2FA system built in pure Rust. Designed to remain secure against both classical and quantum adversaries.
 
